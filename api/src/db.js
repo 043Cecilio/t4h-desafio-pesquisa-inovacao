@@ -1,21 +1,16 @@
-const { Client } = require('pg');
+const { Pool } = require('pg');
 
-const config = {
+const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   port: Number(process.env.DB_PORT || 5432),
   user: process.env.DB_USER || 'loja',
   database: process.env.DB_NAME || 'loja',
-};
+  max: Number(process.env.DB_POOL_MAX || 20),
+});
 
 async function consultar(sql, parametros = []) {
-  const cliente = new Client(config);
-  await cliente.connect();
-  try {
-    const resultado = await cliente.query(sql, parametros);
-    return resultado.rows;
-  } finally {
-    await cliente.end();
-  }
+  const resultado = await pool.query(sql, parametros);
+  return resultado.rows;
 }
 
 module.exports = { consultar };
