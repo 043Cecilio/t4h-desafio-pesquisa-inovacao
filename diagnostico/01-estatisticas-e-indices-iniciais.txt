@@ -1,0 +1,16 @@
+    tabela    | linhas  | seq_scan | seq_tup_read | idx_scan | idx_tup_fetch 
+--------------+---------+----------+--------------+----------+---------------
+ itens_pedido | 1500000 |     2579 |   1960500000 |        0 |             0
+ pedidos      |  500000 |     1287 |    325000000 |  1500264 |       1500000
+ clientes     |  100000 |      170 |     16900000 |   500497 |        500489
+ produtos     |   20000 |      283 |      5640000 |  1503549 |       1503465
+(4 rows)
+
+  tablename   |     indexname     |                                   indexdef                                    
+--------------+-------------------+-------------------------------------------------------------------------------
+ clientes     | clientes_pkey     | CREATE UNIQUE INDEX clientes_pkey ON public.clientes USING btree (id)
+ itens_pedido | itens_pedido_pkey | CREATE UNIQUE INDEX itens_pedido_pkey ON public.itens_pedido USING btree (id)
+ pedidos      | pedidos_pkey      | CREATE UNIQUE INDEX pedidos_pkey ON public.pedidos USING btree (id)
+ produtos     | produtos_pkey     | CREATE UNIQUE INDEX produtos_pkey ON public.produtos USING btree (id)
+(4 rows)
+
