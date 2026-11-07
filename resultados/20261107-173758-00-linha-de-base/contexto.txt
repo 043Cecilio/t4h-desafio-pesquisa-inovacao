@@ -1,10 +1,10 @@
 rotulo: 00-linha-de-base
-data: 2026-11-07 17:26:24 -0300
+data: 2026-11-07 17:37:58 -0300
 vus: 20
 duracao: 60s
 aquecimento: 15s
 semente: 42
-commit: b4749b8
+commit: 3538269
 arquivos alterados sem commit: 0
 
 limites dos containers:
