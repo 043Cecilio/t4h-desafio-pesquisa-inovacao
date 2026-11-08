@@ -92,4 +92,4 @@ Para resolver os gargalos residuais, documentamos em [próximos testes](../proxi
 
 ## 9. Uso de IA
 
-Utilizei assistente de IA (Gemini) como apoio para estruturar scripts de diagnóstico SQL (`EXPLAIN ANALYZE` e `pg_stat_user_tables`), revisar a sintaxe de queries e organizar a formatação Markdown da documentação. Todos os comandos foram executados localmente no meu ambiente Docker, os contratos foram validados em 100% pelo `verificar-contrato.sh` e todos os números reportados foram extraídos sem edição das pastas geradas pelo `scripts/medir.sh`.
+Utilizei assistente de IA como apoio para estruturar scripts de diagnóstico SQL (`EXPLAIN ANALYZE` e `pg_stat_user_tables`), revisar a sintaxe de queries e organizar a formatação Markdown da documentação. Todos os comandos foram executados localmente no meu ambiente Docker, os contratos foram validados em 100% pelo `verificar-contrato.sh` e todos os números reportados foram extraídos sem edição das pastas geradas pelo `scripts/medir.sh`.
