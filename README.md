@@ -228,4 +228,9 @@ Em sua configuração original (Node.js 20 com 0,5 CPU / 256 MiB de RAM e Postgr
 | **`00-linha-de-base`** | 4,41 | 691,1 ms | 15.274,7 ms | 98,2% | 8,3% | 45,2 MiB | Mantido |
 | **`01-pool-conexoes`** | 5,50 (+24,7%) | 451,4 ms (-34,7%) | 12.662,6 ms (-17,1%) | 98,4% | 6,3% | 48,0 MiB | Mantido |
 | **`02-indices`** | 18,54 (+320,4%) | 101,4 ms (-85,3%) | 6.416,5 ms (-58,0%) | 99,8% | 20,4% | 90,7 MiB | Mantido |
-| **`03-join-pedidos-cliente`** | **19,37 (+339,2%)** | 95,4 ms (-86,2%) | **6.233,7
+| **`03-join-pedidos-cliente`** | 19,37 (+339,2%) | 95,4 ms (-86,2%) | 6.233,7 ms (-59,2%) | 99,5% | 20,0% | 92,5 MiB | Mantido |
+| **`04-sql-vendas-por-dia`** | 18,55 (+320,6%) | 92,5 ms (-86,6%) | 6.965,5 ms (-54,4%) | 100,3% | 3,3% | 25,9 MiB | Mantido |
+
+* **Registro detalhado dos experimentos:** [experimentos.md](experimentos.md)
+* **Fichas de hipóteses para testes futuros:** [proximos-testes.md](proximos-testes.md)
+* **Artigo técnico completo:** [artigo/artigo.md](artigo/artigo.md)
