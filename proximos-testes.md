@@ -1,57 +1,31 @@
-# Próximos Testes e Ciclo de Otimização Futuro
+# Registro de Experimentos (`experimentos.md`)
 
-Após os 4 experimentos implementados, 4 das 7 rotas da API respondem entre **3,8 ms e 96,7 ms** na mediana (`cliente`, `cliente-por-email`, `pedidos-do-cliente` e `busca-produtos`). No entanto, o container do PostgreSQL permanece operando com **~100% de uso de 1 CPU** (`recursos.txt`), concentrado nas três operações analíticas e de paginação profunda: `top-produtos` (mediana de 16,8 s), `pedidos-por-status` (p95 de 12,5 s) e o join residual de `vendas-por-dia` (mediana de 2,49 s).
+Todos os experimentos abaixo foram medidos com `scripts/medir.sh` sob os mesmos parâmetros da linha de base (`VUS=20`, `DURACAO=60s`, `AQUECIMENTO=15s`, `SEMENTE=42`), com commit realizado antes da medição (`arquivos alterados sem commit: 0` em `contexto.txt`) e contrato validado (`42/42 respostas iguais`).
 
-Abaixo estão os próximos experimentos priorizados por impacto esperado, com hipótese, implementação e forma de medição.
-
----
-
-## Prioridade 1 — Pré-agregação / Visão Materializada para `GET /relatorios/top-produtos`
-
-* **Gargalo Alvo:** A rota `/relatorios/top-produtos` representa apenas 2% das requisições do teste de carga (~21 chamadas por minuto), mas cada execução realiza um `Parallel Hash Join` entre `pedidos` (filtrando `status <> 'cancelado'`, o que abrange **90% da tabela / 450.000 pedidos**), `itens_pedido` (**1.350.000 itens**) e `produtos` (**20.000 produtos**), seguido de `HashAggregate`. No `EXPLAIN ANALYZE` isolado (`diagnostico/02-explain-analyze-linha-de-base.txt`), uma única chamada consome **1.011,9 ms** e lê mais de 30.000 blocos de buffer. Sob concorrência, seu p95 chega a **32,3 segundos**.
-* **Hipótese:** Como a condição `status <> 'cancelado'` seleciona 90% da base, nenhum índice B-Tree convencional evita a varredura de 1,35 milhão de itens. Criar uma visão materializada (`CREATE MATERIALIZED VIEW mv_top_produtos`) — ou tabela de resumo mantida por *trigger* em cargas de escrita — pré-agregando `unidades` e `receita_centavos` por produto reduzirá o tempo de execução de `top-produtos` de **> 1.000 ms para < 2 ms** (leitura indexada de no máximo 50 linhas), liberando a maior fatia de CPU do PostgreSQL.
-* **Implementação Proposta (`banco/04-mv-top-produtos.sql`):**
-  ```sql
-  CREATE MATERIALIZED VIEW mv_top_produtos AS
-  SELECT pr.id AS produto_id,
-         pr.nome,
-         pr.categoria,
-         sum(i.quantidade)::bigint AS unidades,
-         sum(i.quantidade * i.preco_unitario_centavos)::bigint AS receita_centavos
-    FROM itens_pedido i
-    JOIN pedidos p ON p.id = i.pedido_id
-    JOIN produtos pr ON pr.id = i.produto_id
-   WHERE p.status <> 'cancelado'
-   GROUP BY pr.id, pr.nome, pr.categoria;
-
-  CREATE UNIQUE INDEX idx_mv_top_produtos_receita
-    ON mv_top_produtos (receita_centavos DESC, produto_id ASC);
-  ```
-* **Como testar:** Apontar a consulta de `GET /relatorios/top-produtos` para `mv_top_produtos`, validar as 42 respostas com `scripts/verificar-contrato.sh comparar` e rodar 3 medições com `scripts/medir.sh 05-mv-top-produtos`.
+* **Critério de comparação ("antes" utilizado):** Para avaliar o efeito isolado de cada mudança incremental, o **"antes"** de cada experimento é a **mediana da mudança imediatamente anterior** (ex.: `01` compara contra `00`; `02` compara contra `01`; `03` compara contra `02`; `04` compara contra `03`). Na última seção, apresentamos também a comparação acumulada contra a `00-linha-de-base`.
 
 ---
 
-## Prioridade 2 — Índice Composto de Cobertura (*Index-Only Scan*) e `VACUUM ANALYZE` em `GET /pedidos`
+## Tabela de Ideias Aplicadas e Medidas
 
-* **Gargalo Alvo:** A rota `GET /pedidos?status=...&pagina=...` (`pedidos-por-status`, 15% da carga) possui mediana de **595,3 ms**, mas seu p95 atinge **12.578,5 ms**. Isso ocorre por três motivos evidenciados no `EXPLAIN ANALYZE`:
-  1. A rota executa duas queries por requisição: `SELECT count(*) FROM pedidos WHERE status = $1` (varrendo ~100.000 a 200.000 registros por status) e `SELECT * FROM pedidos WHERE status = $1 ORDER BY criado_em DESC, id DESC LIMIT 20 OFFSET $3`.
-  2. O índice atual `idx_pedidos_status` indexa apenas `(status)`. O PostgreSQL precisa buscar dezenas de milhares de tuplas no *heap* e realizar um *Sort* em memória por `criado_em DESC, id DESC`.
-  3. O uso de `SELECT *` obriga a leitura da coluna de texto `observacoes` (`width=299`), embora a resposta JSON retorne apenas `id, cliente_id, status, criado_em`. Além disso, sem rodar `VACUUM ANALYZE` após o `02-dados.sql`, o *Visibility Map* não está preenchido, impedindo *Index-Only Scans*.
-* **Hipótese:** Substituir `SELECT *` por `SELECT id, cliente_id, status, criado_em`, criar o índice composto de cobertura `CREATE INDEX idx_pedidos_status_criado_id ON pedidos (status, criado_em DESC, id DESC) INCLUDE (cliente_id)` e executar `VACUUM ANALYZE` na inicialização permitirá que tanto o `count(*)` quanto a paginação ordenada sejam resolvidos inteiramente via **Index-Only Scan** sem etapa de *Sort*.
-* **Como testar:** Adicionar o índice composto e `VACUUM ANALYZE` em `banco/04-indices-cobertura.sql`, ajustar as colunas projetadas em `api/src/rotas.js`, validar o contrato e medir 3 vezes (`scripts/medir.sh 06-indice-cobertura-pedidos`).
-
----
-
-## Prioridade 3 — Índices de Cobertura para o Join de `GET /relatorios/vendas-por-dia`
-
-* **Gargalo Alvo:** No Experimento 04, `vendas-por-dia` caiu de 5,6 s para 2,49 s na mediana, mas ainda realiza leituras no *heap* de `itens_pedido` para buscar `quantidade` e `preco_unitario_centavos` dos pedidos do período.
-* **Hipótese:** Criar um índice parcial de cobertura em `pedidos` (`CREATE INDEX idx_pedidos_ativos_criado_em ON pedidos (criado_em, id) WHERE status <> 'cancelado'`) em conjunto com um índice de cobertura em `itens_pedido` (`CREATE INDEX idx_itens_pedido_cobertura ON itens_pedido (pedido_id) INCLUDE (quantidade, preco_unitario_centavos)`) permitirá que o join e a soma financeira ocorram 100% via *Index-Only Scan*, reduzindo a latência de `vendas-por-dia` de ~2,49 s para menos de 100 ms.
+| # / Rótulo | Ideia e Hipótese | Fonte da Ideia | Status | Base do "Antes" | Antes (Mediana) | Depois (Mediana) | Pastas de Resultados (`resultados/`) | Conclusão |
+| :--- | :--- | :--- | :---: | :---: | :--- | :--- | :--- | :--- |
+| **`00-linha-de-base`** | Medição inicial da aplicação exatamente como veio. | Enunciado do desafio (`README.md`) | Linha de base | — | — | **4,41 req/s**<br>Mediana: **691,1 ms**<br>p95: **15.274,7 ms**<br>CPU Banco: **98,2%** \| API: **8,3%**<br>Mem Banco: **426,1 MiB** \| API: **45,2 MiB** | `resultados/20261107-173622-00-linha-de-base/`<br>`resultados/20261107-173758-00-linha-de-base/`<br>`resultados/20261107-173932-00-linha-de-base/` | Banco saturado em CPU (98,2%) realizando bilhões de leituras em *Sequential Scan*. |
+| **`01-pool-conexoes`** | Substituir `new Client()` por `new Pool({ max: 20 })` em `api/src/db.js` deve reduzir a latência de abertura de conexão TCP/processo no PostgreSQL e aumentar a vazão. | [Documentação Oficial `node-postgres` (Pooling)](https://node-postgres.com/features/pooling) e [Docs PostgreSQL 16 (Connections)](https://www.postgresql.org/docs/16/runtime-config-connection.html) | **Aplicada e medida** | `00-linha-de-base` | **4,41 req/s**<br>Mediana: **691,1 ms**<br>p95: **15.274,7 ms**<br>Rota `cliente` (med/p95): **292,4 / 601,6 ms**<br>CPU Banco: **98,2%** \| API: **8,3%** | **5,50 req/s (+24,7%)**<br>Mediana: **451,4 ms (-34,7%)**<br>p95: **12.662,6 ms (-17,1%)**<br>Rota `cliente` (med/p95): **98,4 / 222,4 ms**<br>CPU Banco: **98,4%** \| API: **6,3%** | `resultados/20261107-193207-01-pool-conexoes/` | **Mantida.** Eliminou o *overhead* de conectar/desconectar por query e reduziu em 66% a mediana da rota `cliente`. |
+| **`02-indices`** | Criar índices B-Tree em `banco/03-indices.sql` (`clientes(lower(email))`, `pedidos(cliente_id)`, `pedidos(status)`, `pedidos(criado_em)`, `itens_pedido(pedido_id)`, `itens_pedido(produto_id)`) deve eliminar *Seq Scans* nas buscas pontuais. | [Docs PostgreSQL 16 (Chapter 11: Indexes)](https://www.postgresql.org/docs/16/indexes.html) e diagnóstico em `diagnostico/01-estatisticas-e-indices-iniciais.txt` | **Aplicada e medida** | `01-pool-conexoes` | **5,50 req/s**<br>Mediana: **451,4 ms**<br>p95: **12.662,6 ms**<br>`pedidos-do-cliente` (med): **9.183,7 ms**<br>`cliente-por-email` (med): **398,2 ms** | **18,54 req/s (+237,1%)**<br>Mediana: **101,4 ms (-77,5%)**<br>p95: **6.416,5 ms (-49,3%)**<br>`pedidos-do-cliente` (med): **291,8 ms (-96,8%)**<br>`cliente-por-email` (med): **72,0 ms (-81,9%)** | `resultados/20261107-203632-02-indices/`<br>*(e as 2 rodadas complementares `02-indices` em `resultados/`)* | **Mantida.** Maior ganho estrutural do projeto: multiplicou a vazão por 3,37x sobre o Exp 01 (4,20x sobre a base). |
+| **`03-join-pedidos-cliente`** | Substituir as consultas em laço (N+1) de `GET /clientes/:id/pedidos` em `api/src/rotas.js` por uma única query com `LEFT JOIN` deve reduzir o p95 e a mediana dessa rota. | [Docs PostgreSQL 16 (Performance Tips)](https://www.postgresql.org/docs/16/performance-tips.html) e diagnóstico em `diagnostico/02-explain-analyze-linha-de-base.txt` | **Aplicada e medida** | `02-indices` | **18,54 req/s**<br>p95 geral: **6.416,5 ms**<br>Rota `pedidos-do-cliente`:<br>Mediana: **291,8 ms**<br>p95: **709,9 ms** | **19,37 req/s (+4,5%)**<br>p95 geral: **6.233,7 ms (-2,8%)**<br>Rota `pedidos-do-cliente`:<br>Mediana: **95,1 ms (-67,4%)**<br>p95: **290,2 ms (-59,1%)** | `resultados/20261107-212159-03-join-pedidos-cliente/`<br>`resultados/20261107-212332-03-join-pedidos-cliente/`<br>`resultados/20261107-212501-03-join-pedidos-cliente/` | **Mantida.** Reduziu $1+N+M$ viagens ao banco para 2 queries rápidas, derrubando a mediana da rota para < 100 ms. |
+| **`04-sql-vendas-por-dia`** | Remover o cast `::date` da coluna `p.criado_em` (tornando o filtro SARGable) e delegar o `GROUP BY` ao PostgreSQL em `GET /relatorios/vendas-por-dia` deve reduzir o tempo da rota e o uso de CPU/RAM da API. | [Winand, M. *Use The Index, Luke* (Obfuscated Conditions)](https://use-the-index-luke.com/sql/where-clause/obfuscated/dates) e [Docs PostgreSQL 16 (Aggregate Functions)](https://www.postgresql.org/docs/16/functions-aggregate.html) | **Aplicada e medida** | `03-join-pedidos-cliente` | **19,37 req/s**<br>Mediana geral: **95,4 ms**<br>Rota `vendas-por-dia`:<br>Mediana: **5.635,6 ms** \| p95: **7.240,8 ms**<br>CPU API: **20,0%** \| Mem Máx API: **92,5 MiB** | **18,55 req/s (-4,2%)**<br>Mediana geral: **92,5 ms (-3,0%)**<br>Rota `vendas-por-dia`:<br>Mediana: **2.492,9 ms (-55,8%)** \| p95: **6.126,3 ms (-15,4%)**<br>CPU API: **3,3% (-83,5%)** \| Mem Máx API: **25,9 MiB (-72,0%)** | `resultados/20261107-213918-04-sql-vendas-por-dia/`<br>`resultados/20261107-214052-04-sql-vendas-por-dia/`<br>`resultados/20261107-214223-04-sql-vendas-por-dia/` | **Mantida.** Cortou a mediana da rota pela metade e desafogou completamente a CPU (-83,5%) e a RAM (-72%) da API. A vazão global não subiu porque a CPU do banco seguiu em 100% nas rotas `top-produtos` e `pedidos-por-status`. |
 
 ---
 
-## Prioridade 4 — Índice GIN de Trigramas (`pg_trgm`) em `GET /produtos/busca` e Remoção de Serialização no Logger
+## Comparação Acumulada: Linha de Base (`00`) vs. Estado Final (`04`)
 
-* **Gargalo Alvo:**
-  1. A busca textual `WHERE nome ILIKE '%' || $1 || '%'` impede o uso de índices B-Tree comuns, exigindo um `Seq Scan` nas 20.000 linhas de `produtos` (~10,9 ms isolado, ~96,7 ms sob carga).
-  2. Em `api/src/server.js`, o middleware intercepta `res.json` para serializar o payload completo (`JSON.stringify(corpo).length`) e emitir `console.log` síncrono em todas as requisições.
-* **Hipótese:** Habilitar a extensão `pg_trgm` com índice `USING gin (nome gin_trgm_ops)` eliminará o `Seq Scan` em `produtos`, e substituir a serialização duplicada em `server.js` pela leitura do cabeçalho `res.get('content-length')` reduzirá ainda mais o custo de CPU e *Garbage Collection* no Node.js.
+| Rota | Mediana `00-linha-de-base` | Mediana `04-sql-vendas-por-dia` | p95 `00-linha-de-base` | p95 `04-sql-vendas-por-dia` | Ganho na Mediana |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **`cliente`** (`GET /clientes/:id`) | 292,4 ms | **3,8 ms** | 601,6 ms | **101,7 ms** | **-98,7%** |
+| **`cliente-por-email`** (`GET /clientes?email=`) | 519,8 ms | **5,5 ms** | 2.230,8 ms | **120,6 ms** | **-98,9%** |
+| **`pedidos-do-cliente`** (`GET /clientes/:id/pedidos`) | 11.913,6 ms | **92,9 ms** | 19.126,2 ms | **202,7 ms** | **-99,2%** |
+| **`busca-produtos`** (`GET /produtos/busca?q=`) | 394,3 ms | **96,7 ms** | 743,3 ms | **202,8 ms** | **-75,5%** |
+| **`pedidos-por-status`** (`GET /pedidos?status=&pagina=`) | 7.385,1 ms | **595,3 ms** | 13.661,5 ms | **12.578,5 ms** | **-91,9%** |
+| **`vendas-por-dia`** (`GET /relatorios/vendas-por-dia`) | 4.421,0 ms | **2.492,9 ms** | 7.518,2 ms | **6.126,3 ms** | **-43,6%** |
+| **`top-produtos`** (`GET /relatorios/top-produtos`) | 12.760,4 ms | **16.813,3 ms** | 18.817,2 ms | **32.301,8 ms** | *Gargalo residual mapeado em `proximos-testes.md`* |
